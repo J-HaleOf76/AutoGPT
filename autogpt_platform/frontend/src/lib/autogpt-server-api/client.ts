@@ -15,7 +15,6 @@ import {
   GraphUpdateable,
   NodeExecutionResult,
   MyAgentsResponse,
-  OAuth2Credentials,
   ProfileDetails,
   User,
   StoreAgentsResponse,
@@ -29,6 +28,11 @@ import {
   StoreReview,
   ScheduleCreatable,
   Schedule,
+  UserPasswordCredentials,
+  Credentials,
+  APIKeyPermission,
+  CreateAPIKeyResponse,
+  APIKey,
 } from "./types";
 import { createBrowserClient } from "@supabase/ssr";
 import getServerSupabase from "../supabase/getServerSupabase";
@@ -83,6 +87,29 @@ export default class BackendAPI {
     } catch (error) {
       return Promise.resolve({ credits: 0 });
     }
+  }
+
+  getAutoTopUpConfig(): Promise<{ amount: number; threshold: number }> {
+    return this._get("/credits/auto-top-up");
+  }
+
+  setAutoTopUpConfig(config: {
+    amount: number;
+    threshold: number;
+  }): Promise<{ amount: number; threshold: number }> {
+    return this._request("POST", "/credits/auto-top-up", config);
+  }
+
+  requestTopUp(amount: number): Promise<{ checkout_url: string }> {
+    return this._request("POST", "/credits", { amount });
+  }
+
+  getUserPaymentPortalLink(): Promise<{ url: string }> {
+    return this._get("/credits/manage");
+  }
+
+  fulfillCheckout(): Promise<void> {
+    return this._request("PATCH", "/credits");
   }
 
   getBlocks(): Promise<Block[]> {
@@ -188,7 +215,17 @@ export default class BackendAPI {
     return this._request(
       "POST",
       `/integrations/${credentials.provider}/credentials`,
-      credentials,
+      { ...credentials, type: "api_key" },
+    );
+  }
+
+  createUserPasswordCredentials(
+    credentials: Omit<UserPasswordCredentials, "id" | "type">,
+  ): Promise<UserPasswordCredentials> {
+    return this._request(
+      "POST",
+      `/integrations/${credentials.provider}/credentials`,
+      { ...credentials, type: "user_password" },
     );
   }
 
@@ -200,10 +237,7 @@ export default class BackendAPI {
     );
   }
 
-  getCredentials(
-    provider: string,
-    id: string,
-  ): Promise<APIKeyCredentials | OAuth2Credentials> {
+  getCredentials(provider: string, id: string): Promise<Credentials> {
     return this._get(`/integrations/${provider}/credentials/${id}`);
   }
 
@@ -219,6 +253,36 @@ export default class BackendAPI {
       `/integrations/${provider}/credentials/${id}`,
       force ? { force: true } : undefined,
     );
+  }
+
+  // API Key related requests
+  async createAPIKey(
+    name: string,
+    permissions: APIKeyPermission[],
+    description?: string,
+  ): Promise<CreateAPIKeyResponse> {
+    return this._request("POST", "/api-keys", {
+      name,
+      permissions,
+      description,
+    });
+  }
+
+  async listAPIKeys(): Promise<APIKey[]> {
+    return this._get("/api-keys");
+  }
+
+  async revokeAPIKey(keyId: string): Promise<APIKey> {
+    return this._request("DELETE", `/api-keys/${keyId}`);
+  }
+
+  async updateAPIKeyPermissions(
+    keyId: string,
+    permissions: APIKeyPermission[],
+  ): Promise<APIKey> {
+    return this._request("PUT", `/api-keys/${keyId}/permissions`, {
+      permissions,
+    });
   }
 
   /**
@@ -346,6 +410,17 @@ export default class BackendAPI {
     page_size?: number;
   }): Promise<MyAgentsResponse> {
     return this._get("/store/myagents", params);
+  }
+
+  downloadStoreAgent(
+    storeListingVersionId: string,
+    version?: number,
+  ): Promise<BlobPart> {
+    const url = version
+      ? `/store/download/agents/${storeListingVersionId}?version=${version}`
+      : `/store/download/agents/${storeListingVersionId}`;
+
+    return this._get(url);
   }
 
   /////////////////////////////////////////
@@ -491,7 +566,22 @@ export default class BackendAPI {
       let errorDetail;
       try {
         const errorData = await response.json();
-        errorDetail = errorData.detail || response.statusText;
+        if (
+          Array.isArray(errorData.detail) &&
+          errorData.detail.length > 0 &&
+          errorData.detail[0].loc
+        ) {
+          // This appears to be a Pydantic validation error
+          const errors = errorData.detail.map(
+            (err: _PydanticValidationError) => {
+              const location = err.loc.join(" -> ");
+              return `${location}: ${err.msg}`;
+            },
+          );
+          errorDetail = errors.join("\n");
+        } else {
+          errorDetail = errorData.detail || response.statusText;
+        }
       } catch (e) {
         errorDetail = response.statusText;
       }
@@ -672,6 +762,13 @@ type WebsocketMessage = {
     data: WebsocketMessageTypeMap[M];
   };
 }[keyof WebsocketMessageTypeMap];
+
+type _PydanticValidationError = {
+  type: string;
+  loc: string[];
+  msg: string;
+  input: any;
+};
 
 /* *** HELPER FUNCTIONS *** */
 
