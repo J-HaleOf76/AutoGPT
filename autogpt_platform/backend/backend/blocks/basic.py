@@ -1,12 +1,23 @@
 import enum
-from typing import Any, List
+from typing import TYPE_CHECKING, Any, List
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema, BlockType
+from backend.data.block import (
+    Block,
+    BlockCategory,
+    BlockInput,
+    BlockOutput,
+    BlockSchema,
+    BlockType,
+)
 from backend.data.model import SchemaField
+from backend.util import json
 from backend.util.file import MediaFile, store_media_file
 from backend.util.mock import MockObject
 from backend.util.text import TextFormatter
 from backend.util.type import convert
+
+if TYPE_CHECKING:
+    from backend.data.graph import Link
 
 formatter = TextFormatter()
 
@@ -153,6 +164,9 @@ class FindInDictionaryBlock(Block):
         obj = input_data.input
         key = input_data.key
 
+        if isinstance(obj, str):
+            obj = json.loads(obj)
+
         if isinstance(obj, dict) and key in obj:
             yield "output", obj[key]
         elif isinstance(obj, list) and isinstance(key, int) and 0 <= key < len(obj):
@@ -297,6 +311,7 @@ class AgentOutputBlock(Block):
 
     class Output(BlockSchema):
         output: Any = SchemaField(description="The value recorded as output.")
+        name: Any = SchemaField(description="The name of the value recorded as output.")
 
     def __init__(self):
         super().__init__(
@@ -348,6 +363,7 @@ class AgentOutputBlock(Block):
                 yield "output", f"Error: {e}, {input_data.value}"
         else:
             yield "output", input_data.value
+            yield "name", input_data.name
 
 
 class AddToDictionaryBlock(Block):
@@ -449,6 +465,17 @@ class AddToListBlock(Block):
             default=None,
             description="The position to insert the new entry. If not provided, the entry will be appended to the end of the list.",
         )
+
+        @classmethod
+        def get_missing_links(cls, data: BlockInput, links: List["Link"]) -> set[str]:
+            return super().get_missing_links(
+                data,
+                [
+                    link
+                    for link in links
+                    if link.sink_name != "list" or link.sink_id != link.source_id
+                ],
+            )
 
     class Output(BlockSchema):
         updated_list: List[Any] = SchemaField(
