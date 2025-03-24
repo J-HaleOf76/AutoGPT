@@ -1,4 +1,5 @@
 import logging
+import tempfile
 import typing
 import urllib.parse
 
@@ -7,11 +8,13 @@ import autogpt_libs.auth.middleware
 import fastapi
 import fastapi.responses
 
+import backend.data.block
 import backend.data.graph
 import backend.server.v2.store.db
 import backend.server.v2.store.image_gen
 import backend.server.v2.store.media
 import backend.server.v2.store.model
+import backend.util.json
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,11 @@ async def get_profile(
     """
     try:
         profile = await backend.server.v2.store.db.get_user_profile(user_id)
+        if profile is None:
+            return fastapi.responses.JSONResponse(
+                status_code=404,
+                content={"detail": "Profile not found"},
+            )
         return profile
     except Exception:
         logger.exception("Exception occurred whilst getting user profile")
@@ -73,7 +81,7 @@ async def update_or_create_profile(
         HTTPException: If there is an error updating the profile
     """
     try:
-        updated_profile = await backend.server.v2.store.db.update_or_create_profile(
+        updated_profile = await backend.server.v2.store.db.update_profile(
             user_id=user_id, profile=profile
         )
         return updated_profile
@@ -574,4 +582,75 @@ async def generate_image(
         return fastapi.responses.JSONResponse(
             status_code=500,
             content={"detail": "An error occurred while generating the image"},
+        )
+
+
+@router.get(
+    "/download/agents/{store_listing_version_id}",
+    tags=["store", "public"],
+)
+async def download_agent_file(
+    user_id: typing.Annotated[
+        str, fastapi.Depends(autogpt_libs.auth.depends.get_user_id)
+    ],
+    store_listing_version_id: str = fastapi.Path(
+        ..., description="The ID of the agent to download"
+    ),
+) -> fastapi.responses.FileResponse:
+    """
+    Download the agent file by streaming its content.
+
+    Args:
+        store_listing_version_id (str): The ID of the agent to download
+
+    Returns:
+        StreamingResponse: A streaming response containing the agent's graph data.
+
+    Raises:
+        HTTPException: If the agent is not found or an unexpected error occurs.
+    """
+
+    graph_data = await backend.server.v2.store.db.get_agent(
+        user_id=user_id,
+        store_listing_version_id=store_listing_version_id,
+    )
+    file_name = f"agent_{graph_data.id}_v{graph_data.version or 'latest'}.json"
+
+    # Sending graph as a stream (similar to marketplace v1)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as tmp_file:
+        tmp_file.write(backend.util.json.dumps(graph_data))
+        tmp_file.flush()
+
+        return fastapi.responses.FileResponse(
+            tmp_file.name, filename=file_name, media_type="application/json"
+        )
+
+
+@router.post(
+    "/submissions/review/{store_listing_version_id}",
+    tags=["store", "private"],
+)
+async def review_submission(
+    request: backend.server.v2.store.model.ReviewSubmissionRequest,
+    user: typing.Annotated[
+        autogpt_libs.auth.models.User,
+        fastapi.Depends(autogpt_libs.auth.depends.requires_admin_user),
+    ],
+):
+    # Proceed with the review submission logic
+    try:
+        submission = await backend.server.v2.store.db.review_store_submission(
+            store_listing_version_id=request.store_listing_version_id,
+            is_approved=request.is_approved,
+            comments=request.comments,
+            reviewer_id=user.user_id,
+        )
+        return submission
+    except Exception as e:
+        logger.error(f"Could not create store submission review: {e}")
+        raise fastapi.HTTPException(
+            status_code=500,
+            detail="An error occurred while creating the store submission review",
         )
